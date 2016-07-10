@@ -57,12 +57,13 @@ class Annotation extends AbstractAnnotationDriver
                     throw new InvalidMappingException("Sortable position field - [{$field}] type is not valid and must be 'integer' in class - {$meta->name}");
                 }
 
-                foreach ($sortable->groups as $group) {
-                    if (!$meta->hasField($group) && !$meta->isSingleValuedAssociation($group)) {
-                        throw new InvalidMappingException("Sortable field: '{$field}' group: {$group} - is not a mapped
-                                    or single valued association property in class {$meta->name}");
-                    }
-                }
+                // FIXME - What do we do with this check?
+//                foreach ($sortable->groups as $group) {
+//                    if (!$meta->hasField($group) && !$meta->isSingleValuedAssociation($group)) {
+//                        throw new InvalidMappingException("Sortable field: '{$field}' group: {$group} - is not a mapped
+//                                    or single valued association property in class {$meta->name}");
+//                    }
+//                }
 
                 $config['sortables'][$field] = [
                     'position' => $field,

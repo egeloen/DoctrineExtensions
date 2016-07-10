@@ -3,6 +3,7 @@
 namespace Gedmo\Sortable\Mapping\Event\Adapter;
 
 use Doctrine\Common\Persistence\Mapping\ClassMetadata;
+use Doctrine\Common\Persistence\Mapping\ClassMetadataFactory;
 use Doctrine\Common\Util\ClassUtils;
 use Doctrine\ORM\QueryBuilder;
 use Gedmo\Mapping\Event\Adapter\ORM as BaseAdapterORM;
@@ -20,11 +21,12 @@ final class ORM extends BaseAdapterORM implements SortableAdapter
     public function getMaxPosition(array $config, $meta, $groups)
     {
         $em = $this->getObjectManager();
+        $metaFactory = $em->getMetadataFactory();
 
         $qb = $em->createQueryBuilder();
         $qb->select('MAX(n.' . $config['position'] . ')')
             ->from($config['useObjectClass'], 'n');
-        $this->addGroupWhere($qb, $groups, $meta);
+        $this->addGroupWhere($qb, $groups, $meta, $metaFactory);
         $query = $qb->getQuery();
         $query->useQueryCache(false);
         $query->useResultCache(false);
@@ -33,15 +35,26 @@ final class ORM extends BaseAdapterORM implements SortableAdapter
         return $res[0][1];
     }
 
-    private function addGroupWhere(QueryBuilder $qb, $groups, $meta)
+    private function addGroupWhere(QueryBuilder $qb, $groups, $meta, $metaFactory)
     {
         $i = 1;
+        $j = 1;
+
         foreach ($groups as $group => $value) {
+            $groupFields = explode('.', $group);
+            $field = array_pop($groupFields);
+            $alias = 'n';
+
+            foreach ($groupFields as $groupField) {
+                $qb->innerJoin($alias.'.' . $groupField, $alias = 'n__' . $j);
+                $j++;
+            }
+
             if (null === $value) {
-                $qb->andWhere($qb->expr()->isNull('n.' . $group));
+                $qb->andWhere($qb->expr()->isNull($alias.'.' . $field));
             } else {
-                $qb->andWhere('n.' . $group . ' = :group__' . $i);
-                $qb->setParameter('group__' . $i, $this->getGroupValue($value), $this->getGroupType($group, $value, $meta));
+                $qb->andWhere($alias . '.' . $field . ' = :group__' . $i);
+                $qb->setParameter('group__' . $i, $this->getGroupValue($value), $this->getGroupType($group, $value, $meta, $metaFactory));
             }
             $i++;
         }
@@ -69,16 +82,28 @@ final class ORM extends BaseAdapterORM implements SortableAdapter
     }
 
     /**
-     * @param $value
+     * @param string               $group
+     * @param mixed                $value
+     * @param ClassMetadata        $meta
+     * @param ClassMetadataFactory $metaFactory
+     *
      * @return \Doctrine\DBAL\Types\Type|null|string
      */
-    private function getGroupType($group, $value, $meta)
+    private function getGroupType($group, $value, $meta, $metaFactory)
     {
         if (!$this->isEntity($value)) {
-            if ($meta instanceof ClassMetadata) {
-                return $meta->getTypeOfField($group);
+            if (!$meta instanceof ClassMetadata) {
+                return null;
             }
-            return null;
+
+            $groupFields = explode('.', $group);
+            $field = array_pop($groupFields);
+
+            foreach ($groupFields as $groupField) {
+                $meta = $metaFactory->getMetadataFor($groupField);
+            }
+
+            return $meta->getTypeOfField($field);
         }
 
         $metaData = $this->getObjectManager()->getClassMetadata(ClassUtils::getClass($value));
@@ -91,66 +116,99 @@ final class ORM extends BaseAdapterORM implements SortableAdapter
 
     public function updatePositions($relocation, $delta, $config)
     {
+        $om = $this->getObjectManager();
+        $metaFactory = $om->getMetadataFactory();
+
         $sign = $delta['delta'] < 0 ? "-" : "+";
         $absDelta = abs($delta['delta']);
-        $dql = "UPDATE {$relocation['name']} n";
-        $dql .= " SET n.{$config['position']} = n.{$config['position']} {$sign} {$absDelta}";
-        $dql .= " WHERE n.{$config['position']} >= {$delta['start']}";
+
+        $updateDql = "UPDATE {$relocation['name']} r";
+        $updateDql .= " SET r.{$config['position']} = r.{$config['position']} {$sign} {$absDelta}";
+        $updateDql .= " WHERE r.id IN (:ids)";
+
+        $selectDql = "SELECT n.id FROM {$relocation['name']} n";
+        $selectDqlJoin = "";
+        $selectDqlWhere = " WHERE n.{$config['position']} >= {$delta['start']}";
+
         // if not null, false or 0
         if ($delta['stop'] > 0) {
-            $dql .= " AND n.{$config['position']} < {$delta['stop']}";
+            $selectDqlWhere .= " AND n.{$config['position']} < {$delta['stop']}";
         }
+
         $i = -1;
+        $j = -1;
         $params = array();
         foreach ($relocation['groups'] as $group => $value) {
+            $groupFields = explode('.', $group);
+            $field = array_pop($groupFields);
+            $alias = 'n';
+
+            foreach ($groupFields as $groupField) {
+                $selectDqlJoin .= " INNER JOIN {$alias}.{$groupField} " . ($alias = "n__" . (++$j));
+            }
+
             if (null === $value) {
-                $dql .= " AND n.{$group} IS NULL";
+                $selectDqlWhere .= " AND {$alias}.{$field} IS NULL";
             } else {
-                $dql .= " AND n.{$group} = :val___" . (++$i);
+                $selectDqlWhere .= " AND {$alias}.{$field} = :val___" . (++$i);
                 $params['val___' . $i] = $value;
             }
         }
 
-        $meta = $this->getObjectManager()->getClassMetadata($relocation['name']);
+        $meta = $om->getClassMetadata($relocation['name']);
         // add excludes
         if (!empty($delta['exclude'])) {
-            $meta = $this->getObjectManager()->getClassMetadata($relocation['name']);
+            $meta = $om->getClassMetadata($relocation['name']);
             if (count($meta->identifier) == 1) {
                 // if we only have one identifier, we can use IN syntax, for better performance
                 $excludedIds = array();
+
                 foreach ($delta['exclude'] as $entity) {
                     if ($id = $meta->getFieldValue($entity, $meta->identifier[0])) {
                         $excludedIds[] = $id;
                     }
                 }
+
                 if (!empty($excludedIds)) {
                     $params['excluded'] = $excludedIds;
-                    $dql .= " AND n.{$meta->identifier[0]} NOT IN (:excluded)";
+                    $selectDqlWhere .= " AND n.{$meta->identifier[0]} NOT IN (:excluded)";
                 }
             } else {
                 if (count($meta->identifier) > 1) {
                     foreach ($delta['exclude'] as $entity) {
                         $j = 0;
-                        $dql .= " AND NOT (";
+                        $selectDqlWhere .= " AND NOT (";
+
                         foreach ($meta->getIdentifierValues($entity) as $id => $value) {
-                            $dql .= ($j > 0 ? " AND " : "") . "n.{$id} = :val___" . (++$i);
+                            $selectDqlWhere .= ($j > 0 ? " AND " : "") . "n.{$id} = :val___" . (++$i);
                             $params['val___' . $i] = $value;
                             $j++;
                         }
-                        $dql .= ")";
+
+                        $selectDqlWhere .= ")";
                     }
                 }
             }
         }
 
+        $selectDql .= $selectDqlJoin . $selectDqlWhere;
+
         $em = $this->getObjectManager();
-        $q = $em->createQuery($dql);
+        $q = $em->createQuery($selectDql);
         $q->setParameters($params);
+
         foreach ($relocation['groups'] as $group => $value) {
             if (!is_null($value)) {
-                $q->setParameter('val___' . $i, $this->getGroupValue($value), $this->getGroupType($group, $value, $meta));
+                $q->setParameter('val___' . $i, $this->getGroupValue($value), $this->getGroupType($group, $value, $meta, $metaFactory));
             }
         }
-        $q->getSingleScalarResult();
+
+        $ids = $q->getScalarResult();
+
+        if (!empty($ids)) {
+            $q = $em->createQuery($updateDql);
+            $q->setParameter('ids', $ids);
+            $q->execute();
+        }
     }
 }

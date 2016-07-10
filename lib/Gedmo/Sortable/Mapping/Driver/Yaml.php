@@ -54,10 +54,11 @@ class Yaml extends File implements Driver
                     $groups = array();
                     if (isset($fieldMapping['gedmo']['sortable']['groups'])) {
                         foreach ($fieldMapping['gedmo']['sortable']['groups'] as $group) {
-                            if (!$meta->hasField($group) && !$meta->isSingleValuedAssociation($group)) {
-                                throw new InvalidMappingException("Sortable field: '{$field}' group: {$group} - is not a mapped
-                                    or single valued association property in class {$meta->name}");
-                            }
+                            // FIXME - What do we do with this check?
+//                            if (!$meta->hasField($group) && !$meta->isSingleValuedAssociation($group)) {
+//                                throw new InvalidMappingException("Sortable field: '{$field}' group: {$group} - is not a mapped
+//                                    or single valued association property in class {$meta->name}");
+//                            }
                             $groups[] = $group;
                         }
                     }

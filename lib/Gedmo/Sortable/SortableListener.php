@@ -4,6 +4,7 @@ namespace Gedmo\Sortable;
 
 use Doctrine\Common\EventArgs;
 use Doctrine\Common\Persistence\Mapping\ClassMetadata;
+use Doctrine\Common\Persistence\Mapping\ClassMetadataFactory;
 use Doctrine\Common\Persistence\Proxy;
 use Doctrine\Common\Util\ClassUtils;
 use Gedmo\Mapping\MappedEventSubscriber;
@@ -112,9 +113,11 @@ class SortableListener extends MappedEventSubscriber
         $meta = $om->getClassMetadata(get_class($object));
 
         if ($config = $this->getConfiguration($om, $meta->name)) {
+            $metaFactory = $om->getMetadataFactory();
+
             foreach ($config['sortables'] as $config) {
                 // Get groups
-                $groups = $this->getGroups($meta, $config, $object);
+                $groups = $this->getGroups($metaFactory, $config, $object);
 
                 // Get hash
                 $hash = $this->getHash($groups, $config);
@@ -160,6 +163,7 @@ class SortableListener extends MappedEventSubscriber
     {
         $em = $ea->getObjectManager();
         $uow = $em->getUnitOfWork();
+        $metaFactory = $em->getMetadataFactory();
 
         foreach ($config['sortables'] as $config) {
             $old = $meta->getReflectionProperty($config['position'])->getValue($object);
@@ -170,7 +174,7 @@ class SortableListener extends MappedEventSubscriber
             }
 
             // Get groups
-            $groups = $this->getGroups($meta, $config, $object);
+            $groups = $this->getGroups($metaFactory, $config, $object);
 
             // Get hash
             $hash = $this->getHash($groups, $config);
@@ -231,6 +235,7 @@ class SortableListener extends MappedEventSubscriber
     {
         $em = $ea->getObjectManager();
         $uow = $em->getUnitOfWork();
+        $metaFactory = $em->getMetadataFactory();
 
         foreach ($config['sortables'] as $config) {
             $changed = false;
@@ -238,7 +243,7 @@ class SortableListener extends MappedEventSubscriber
             $changeSet = $ea->getObjectChangeSet($uow, $object);
 
             // Get groups
-            $groups = $this->getGroups($meta, $config, $object);
+            $groups = $this->getGroups($metaFactory, $config, $object);
 
             // handle old groups
             $oldGroups = $groups;
@@ -382,11 +387,14 @@ class SortableListener extends MappedEventSubscriber
      */
     private function processDeletion(SortableAdapter $ea, array $config, $meta, $object)
     {
+        $om = $ea->getObjectManager();
+        $metaFactory = $om->getMetadataFactory();
+
         foreach ($config['sortables'] as $config) {
             $position = $meta->getReflectionProperty($config['position'])->getValue($object);
 
             // Get groups
-            $groups = $this->getGroups($meta, $config, $object);
+            $groups = $this->getGroups($metaFactory, $config, $object);
 
             // Get hash
             $hash = $this->getHash($groups, $config);
@@ -433,6 +441,9 @@ class SortableListener extends MappedEventSubscriber
     {
         $ea = $this->getEventAdapter($args);
         $em = $ea->getObjectManager();
+        $uow = $em->getUnitOfWork();
+        $metaFactory = $em->getMetadataFactory();
+
         foreach ($this->relocations as $hash => $relocation) {
             $config = $this->getConfiguration($em, $relocation['name']);
             $config = $config['sortables'][$relocation['field']];
@@ -442,10 +453,9 @@ class SortableListener extends MappedEventSubscriber
                     continue;
                 }
 
-                $meta = $em->getClassMetadata($relocation['name']);
+                $meta = $metaFactory->getMetadataFor($relocation['name']);
 
                 // now walk through the unit of work in memory objects and sync those
-                $uow = $em->getUnitOfWork();
                 foreach ($uow->getIdentityMap() as $className => $objects) {
                     // for inheritance mapped classes, only root is always in the identity map
                     if ($className !== $ea->getRootObjectClass($meta) || !$this->getConfiguration($em, $className)) {
@@ -464,7 +474,7 @@ class SortableListener extends MappedEventSubscriber
                         }
 
                         // if the entity's group has changed, we stop now
-                        $groups = $this->getGroups($meta, $config, $object);
+                        $groups = $this->getGroups($metaFactory, $config, $object);
                         foreach (array_keys($groups) as $group) {
                             if (array_key_exists($group, $changeSet)) {
                                 continue 2;
@@ -477,7 +487,7 @@ class SortableListener extends MappedEventSubscriber
                         $matches = $matches && ($delta['stop'] <= 0 || $pos < $delta['stop']);
                         $value = reset($relocation['groups']);
                         while ($matches && ($group = key($relocation['groups']))) {
-                            $gr = $meta->getReflectionProperty($group)->getValue($object);
+                            $gr = $this->getGroupValue($group, $metaFactory, $object);
                             if (null === $value) {
                                 $matches = $gr === null;
                             } elseif (is_object($gr) && is_object($value) && $gr !== $value) {
@@ -525,7 +535,7 @@ class SortableListener extends MappedEventSubscriber
 
         // Get groups
         if (!sizeof($groups)) {
-            $groups = $this->getGroups($meta, $config, $object);
+            $groups = $this->getGroups($em->getMetadataFactory(), $config, $object);
         }
 
         // Get hash
@@ -591,23 +601,45 @@ class SortableListener extends MappedEventSubscriber
     }
 
     /**
-     *
-     * @param array         $config
-     * @param ClassMetadata $meta
-     * @param object        $object
+     * @param ClassMetadataFactory $metaFactory
+     * @param array                $config
+     * @param object               $object
      *
      * @return array
      */
-    private function getGroups($meta, $config, $object)
+    private function getGroups($metaFactory, $config, $object)
     {
         $groups = array();
         if (isset($config['groups'])) {
             foreach ($config['groups'] as $group) {
-                $groups[$group] = $meta->getReflectionProperty($group)->getValue($object);
+                $groups[$group] = $this->getGroupValue($group, $metaFactory, $object);
             }
         }
 
         return $groups;
+    }
+
+    /**
+     * @param string               $group
+     * @param ClassMetadataFactory $metaFactory
+     * @param object               $object
+     *
+     * @return mixed
+     */
+    private function getGroupValue($group, $metaFactory, $object)
+    {
+        $value = $object;
+
+        foreach (explode('.', $group) as $groupField) {
+            if (!is_object($value)) {
+                break;
+            }
+
+            $meta = $metaFactory->getMetadataFor(ClassUtils::getClass($value));
+            $value = $meta->getReflectionProperty($groupField)->getValue($value);
+        }
+
+        return $value;
     }
 
     /**

@@ -52,14 +52,16 @@ class Xml extends BaseXml
                     $groups = array();
                     if ($this->_isAttributeSet($sortable, 'groups')) {
                         $groups = array_map('trim', explode(',', (string) $this->_getAttribute($sortable, 'groups')));
-                        foreach ($groups as $group) {
-                            if (!$meta->hasField($group) && !$meta->isSingleValuedAssociation($group)) {
-                                throw new InvalidMappingException(
-                                    "Sortable field: '{$field}' group: {$group} - is not a mapped
-                                    or single valued association property in class {$meta->name}"
-                                );
-                            }
-                        }
+
+                        // FIXME - What do we do with this check?
+//                        foreach ($groups as $group) {
+//                            if (!$meta->hasField($group) && !$meta->isSingleValuedAssociation($group)) {
+//                                throw new InvalidMappingException(
+//                                    "Sortable field: '{$field}' group: {$group} - is not a mapped
+//                                    or single valued association property in class {$meta->name}"
+//                                );
+//                            }
+//                        }
                     }
 
                     $config['sortables'][$field] = [
